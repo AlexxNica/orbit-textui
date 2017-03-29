@@ -2,9 +2,8 @@
 
 require('logplease').setLogLevel('ERROR')
 
-const Promise = require('bluebird')
 const blessed = require('blessed')
-const IpfsDaemon = require('ipfs-daemon')
+const IpfsDaemon = require('ipfs-daemon/src/ipfs-node-daemon')
 const Orbit = require('orbit_')
 const logo = require('./logo.js')
 
@@ -13,7 +12,7 @@ let channel = 'ipfs'
 let user = process.argv[2] || 'anonymous' + new Date().getTime().toString().split('').splice(-4, 4).join('')
 
 // Directories to save IPFS and Orbit data to
-const dataDir = './data/' + user
+const dataDir = './.orbit-textui/' + user
 const ipfsDataDir = dataDir + '/ipfs'
 
 // State
@@ -248,20 +247,24 @@ const updateUI = () => {
 }
 
 const addMessagesToUI = (channel, messages) => {
-  Promise.map(messages, (post) => {
-    const user = post.meta.from
+  const lines = messages.map(m => {
+    const user = m.Post.meta.from
     const username = `{grey-fg}<{/grey-fg} {bold}${user.name}{/bold}{grey-fg}>{/grey-fg}`
-    const line = `${getFormattedTime(post.meta.ts)} ${username} ${post.content}`
-    channelViews[channel].pushLine(line)
-    channelViews[channel].scrollTo(10000)
+    const line = `${getFormattedTime(m.Post.meta.ts)} ${username} ${m.Post.content}`
+    return line
+  })
+
+  const box = channelViews[channel]
+  while (box.getLine(0)) {
+    box.deleteLine(0)
+  }
+  lines.forEach(e => box.insertBottom(e))
+  // box.setContent(lines)
 
     if(channel !== _currentChannel)
       unreadMessages[channel] ? unreadMessages[channel] += 1 : unreadMessages[channel] = 1
 
-    return
-  }, { concurrency: 1 })
-    .then((res) => updateUI())
-    .catch((e) => console.error(e))
+  updateUI()
 }
 
 /* Start */
@@ -339,18 +342,28 @@ log("Starting IPFS daemon...")
 
 const daemonOptions = { 
   IpfsDataDir: ipfsDataDir,
+  SignalServer: 'star-signal.cloud.ipfs.team', // IPFS dev server
   Addresses: {
     API: '/ip4/127.0.0.1/tcp/0',
     Swarm: ['/ip4/0.0.0.0/tcp/0'],
     Gateway: '/ip4/0.0.0.0/tcp/0'
   },
+  Discovery: {
+    MDNS: {
+      Enabled: false,
+      Interval: 10
+    },
+    webRTCStar: {
+      Enabled: true
+    }
+  },  
 }
 
 const ipfs = new IpfsDaemon(daemonOptions)//.then((res) => {
 ipfs.on('ready', () => {
   const options = {
     cachePath: dataDir + '/orbit-db',
-    maxHistory: 0, 
+    maxHistory: 1, 
     keystorePath: dataDir + '/keys'
   }
 
@@ -371,6 +384,20 @@ ipfs.on('ready', () => {
     screen.insert(channelViews[channel], 1)
     _currentChannel = channel
     log(`{${theme.higlightColor}-fg}{bold}${user}{/bold}{/${theme.higlightColor}-fg} has joined channel {bold}#${channel}{/bold}`)
+
+    // Listen for new messages from the network (ie. database syncs)
+    
+    const c = orbit.channels[channel]
+    if (c) {
+      c.feed.events.on('synced', (channel) => {
+        orbit.get(channel, null, null, 32)
+          .then(messages => addMessagesToUI(channel, messages))
+          .catch((e) => console.error(e))
+      })
+
+      c.feed.events.on('error', e => console.error(e))      
+    }
+
     updateUI()
   })
 
@@ -387,13 +414,17 @@ ipfs.on('ready', () => {
     updateUI()
   })
 
+  // FIX: currently emits only for local messages (sent by this orbit client)
   orbit.events.on('message', (channel, message) => {
-    addMessagesToUI(channel, [message])
+    orbit.get(channel, null, null, 32)
+      .then(messages => addMessagesToUI(channel, messages))
+      .catch(e => console.error(e))
   })
 
   // Connect to Orbit network
   log("Connecting to the network")
+
   orbit.connect(user)
     .then(() => orbit.join(channel))
-    .catch((e) => console.error(e))
+    .catch(e => console.error(e))
 })
